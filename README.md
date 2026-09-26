@@ -1,10 +1,10 @@
 # nix-eve
 
-Run EVE Online on NixOS with UMU and Proton GE. This flake provides an `eve-online` package.
+Run EVE Online on NixOS with UMU and Proton GE.
 
 ## Installing
 
-Add the overlay and package to your host flake:
+Add nix-eve to your host flake:
 
 ```nix
 {
@@ -30,7 +30,7 @@ Add the overlay and package to your host flake:
 }
 ```
 
-If you haven’t already, enable unfree packages and 32-bit graphics as well.
+If you haven't already, enable unfree packages and 32-bit graphics:
 
 ``` nix
 {
@@ -44,27 +44,25 @@ If you haven’t already, enable unfree packages and 32-bit graphics as well.
 
 ## Running EVE
 
-After rebuilding, run the installer to create the Wine prefix and install the
-launcher:
+After rebuilding your system, run the installer to set up the Wine prefix and EVE launcher:
 
 ```sh
 eve-online --install
 ```
 
-For subsequent launches, use the installed desktop entry or run:
+After that, open EVE from your app menu or run:
 
 ```sh
 eve-online
 ```
 
-By default, the Wine prefix and game files are stored in `~/Games/eve-online`.
+EVE keeps its Wine prefix and game files in `~/Games/eve-online` by default.
 
 ## Overrides
 
-Package overrides set persistent defaults. Environment variables take precedence
-at launch.
+Package overrides set the defaults. Environment variables override those settings when you launch EVE.
 
-To change package defaults, use `.override` on `pkgs.eve-online`:
+Use `.override` on `pkgs.eve-online` to change the defaults:
 
 ```nix
 environment.systemPackages = [
@@ -79,8 +77,7 @@ environment.systemPackages = [
 ];
 ```
 
-To apply the same settings to a single launch, set the corresponding environment
-variables before the command:
+For a single launch, you can set the same options with environment variables:
 
 ```sh
 DXVK_HUD=fps \
@@ -90,5 +87,4 @@ PROTONPATH="/path/to/proton" \
 eve-online
 ```
 
-If automatic discovery does not find your launcher, you can also set
-`EVE_LAUNCHER_EXE` to the absolute path of an existing launcher executable.
+If the launcher isn't found automatically, set `EVE_LAUNCHER_EXE` to the absolute path of its executable.
