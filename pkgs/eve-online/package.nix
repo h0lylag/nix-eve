@@ -1,6 +1,7 @@
 {
   coreutils,
   winePrefix ? null,
+  grabPointer ? null,
   extraEnvironment ? { },
   fetchurl,
   icoutils,
@@ -20,6 +21,7 @@ let
   reservedEnvironmentNames = [
     "WINEPREFIX"
     "EVE_WINEPREFIX"
+    "EVE_GRAB_POINTER"
     "STEAM_COMPAT_INSTALL_PATH"
     "PROTONPATH"
   ];
@@ -89,6 +91,7 @@ let
         EVE_WINEPREFIX    Absolute path to override the configured Wine prefix
         PROTONPATH        Override the configured Proton installation
         EVE_LAUNCHER_EXE  Absolute path to the launcher executable
+        EVE_GRAB_POINTER  Y/N to set Wine's GrabPointer; empty leaves it unchanged
       EOF
         ${
           if winePrefix == null then
@@ -106,6 +109,27 @@ let
         show_help
         exit 0
       fi
+
+      grab_pointer=${
+        lib.escapeShellArg (
+          if grabPointer == null then
+            ""
+          else if grabPointer then
+            "Y"
+          else
+            "N"
+        )
+      }
+      if [[ -v EVE_GRAB_POINTER ]]; then
+        grab_pointer="$EVE_GRAB_POINTER"
+      fi
+      case "$grab_pointer" in
+        ""|Y|N) ;;
+        *)
+          printf 'EVE_GRAB_POINTER must be Y, N, or empty: %s\n' "$grab_pointer" >&2
+          exit 2
+          ;;
+      esac
 
       if [[ -n "''${EVE_WINEPREFIX:-}" ]]; then
         if [[ "$EVE_WINEPREFIX" != /* ]]; then
@@ -134,6 +158,92 @@ let
         export WINEDLLOVERRIDES="winemenubuilder.exe=d''${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
       ''}
       ${environmentExports}
+
+      query_registry() {
+        # Proton logging redirects reg.exe's output to a file. Disable it only
+        # for queries whose output we parse, preserving logging for the app.
+        PROTON_LOG=0 PROTON_VERB=run umu-run 'C:\windows\system32\reg.exe' query "$@"
+      }
+
+      read_dotnet_registration() {
+        local status=0
+        # UMU can return success even when reg.exe reports a missing key,
+        # so inspect the returned values as well as the process status.
+        dotnet_registration="$(query_registry "$@")" || status=$?
+        if (( status > 1 )); then
+          printf 'Unable to check the .NET Framework registration in %s\n' "$WINEPREFIX" >&2
+          exit "$status"
+        fi
+      }
+
+      has_dotnet_runtime() {
+        local release_pattern='Release[[:space:]]+REG_DWORD[[:space:]]+0x([[:xdigit:]]{1,8})([[:space:]]|$)'
+        # 379893 is .NET Framework 4.5.2, required by the CCP installer.
+        [[ "$dotnet_registration" =~ $release_pattern ]] && (( 16#''${BASH_REMATCH[1]} >= 379893 ))
+      }
+
+      ensure_dotnet_runtime() {
+        local mono_msi view dotnet_registration
+        local dotnet_key='HKLM\Software\Microsoft\NET Framework Setup\NDP\v4'
+        local mono_installers=()
+        # The packaged Squirrel installer is 32-bit and requires the Full profile.
+        read_dotnet_registration "$dotnet_key\Full" /reg:32
+        if has_dotnet_runtime; then
+          return
+        fi
+
+        for view in 32 64; do
+          # Do not install Mono over an existing native .NET installation,
+          # including Client-only and 64-bit-only registrations.
+          read_dotnet_registration "$dotnet_key" "/reg:$view"
+          if [[ "$dotnet_registration" == *'HKEY_LOCAL_MACHINE\Software\Microsoft\NET Framework Setup\NDP\v4'* ]]; then
+            printf '%s\n' \
+              'The existing .NET Framework registration is older than 4.5.2 or incomplete.' \
+              'Repair that runtime or use a fresh EVE_WINEPREFIX before running --install.' >&2
+            exit 1
+          fi
+        done
+
+        # Use Mono from the selected Proton, including a PROTONPATH override.
+        # Some Proton releases bundle it without registering it in default_pfx.
+        shopt -s nullglob
+        mono_installers=( "$PROTONPATH"/{files,dist}/share/wine/mono/wine-mono*/support/winemono-support.msi )
+        shopt -u nullglob
+        if (( ''${#mono_installers[@]} == 0 )); then
+          printf 'Wine Mono support installer not found in Proton installation: %s\n' "$PROTONPATH" >&2
+          exit 1
+        fi
+        mono_msi="$(printf '%s\n' "''${mono_installers[@]}" | sort --version-sort | tail -n 1)"
+        mono_msi="$(realpath -e -- "$mono_msi")"
+        printf 'Installing bundled Wine Mono support in %s\n' "$WINEPREFIX"
+        PROTON_VERB=run umu-run 'C:\windows\system32\msiexec.exe' \
+          /i "Z:''${mono_msi//\//\\}" /qn /norestart
+
+        read_dotnet_registration "$dotnet_key\Full" /reg:32
+        if ! has_dotnet_runtime; then
+          printf 'Wine Mono did not register .NET Framework support in %s\n' "$WINEPREFIX" >&2
+          exit 1
+        fi
+      }
+
+      configure_grab_pointer() {
+        if [[ -n "$grab_pointer" ]]; then
+          local registration
+          local value_pattern="GrabPointer[[:space:]]+REG_SZ[[:space:]]+$grab_pointer([[:space:]]|$)"
+          # Use the selected Proton through UMU. The run verb avoids waiting
+          # for other Wine processes to exit before updating the registry.
+          PROTON_VERB=run umu-run 'C:\windows\system32\reg.exe' add \
+            'HKCU\Software\Wine\X11 Driver' \
+            /v GrabPointer /t REG_SZ /d "$grab_pointer" /f
+
+          # Check the stored value because UMU can mask reg.exe failures.
+          if ! registration="$(query_registry 'HKCU\Software\Wine\X11 Driver' /v GrabPointer)" \
+            || [[ ! "$registration" =~ $value_pattern ]]; then
+            printf 'Unable to set GrabPointer=%s in %s\n' "$grab_pointer" "$WINEPREFIX" >&2
+            exit 1
+          fi
+        fi
+      }
 
       discover_launcher() {
         local root root_exe version_exe latest_versioned
@@ -205,11 +315,14 @@ let
           shift
           mkdir -p "$WINEPREFIX"
           cd "$WINEPREFIX"
+          ensure_dotnet_runtime
+          configure_grab_pointer
           exec umu-run ${lib.escapeShellArg installer} "$@"
           ;;
         *)
           if discover_launcher; then
             cd "$launcher_workdir"
+            configure_grab_pointer
             exec umu-run "$launcher_exe" --product=eve-online "$@"
           else
             discovery_status=$?
@@ -242,8 +355,11 @@ assert lib.assertMsg (
 assert lib.assertMsg (
   winePrefix == null || lib.hasPrefix "/" winePrefix
 ) "winePrefix must be an absolute path";
+assert lib.assertMsg (
+  grabPointer == null || builtins.isBool grabPointer
+) "grabPointer must be null or a boolean";
 assert lib.assertMsg (builtins.all validEnvironmentName (builtins.attrNames extraEnvironment))
-  "extraEnvironment needs valid shell variable names; prefix and Proton path variables are reserved";
+  "extraEnvironment needs valid shell variable names; use dedicated overrides for reserved variables";
 assert lib.assertMsg (builtins.all builtins.isString (
   builtins.attrValues extraEnvironment
 )) "extraEnvironment values must be strings";

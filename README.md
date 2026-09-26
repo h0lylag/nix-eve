@@ -88,3 +88,17 @@ eve-online
 ```
 
 If the launcher isn't found automatically, set `EVE_LAUNCHER_EXE` to the absolute path of its executable.
+
+### EVE Preview Manager
+
+If you cannot click [EVE Preview Manager](https://github.com/h0lylag/EVE-Preview-Manager) previews, disable Wine's pointer grabbing:
+
+```nix
+pkgs.eve-online.override { grabPointer = false; }
+```
+
+Or override it at launch:
+
+```sh
+EVE_GRAB_POINTER=N eve-online
+```
